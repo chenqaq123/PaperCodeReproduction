@@ -49,7 +49,7 @@ class ConvModel(nn.Module):
         else:
             return x
         
-    def snnl(self, outputs, temperatures, w_label):
+    def snnl(self, outputs, w_label, temperatures):
         x0 = outputs[0]
         x1 = outputs[1]
         x2 = outputs[2]
@@ -66,13 +66,13 @@ class ConvModel(nn.Module):
         loss = F.cross_entropy(self.forward(x), y)
         return loss
 
-    def snnl_loss(self, x, factors, temperatures, w_label):
+    def snnl_loss(self, x, y, w_label, factors, temperatures):
         outputs = self.forward(x, inter_results=True)
         snnl_val = self.snnl(outputs, temperatures, w_label)
         soft_nearest_neighbor = factors[0] * snnl_val[0] + factors[1] * snnl_val[1] + factors[2] * snnl_val[2]
         mean_w = torch.mean(w_label)
         soft_nearest_neighbor = (mean_w > 0).float() * soft_nearest_neighbor
-        return soft_nearest_neighbor
+        return self.ce_loss(x, y) - soft_nearest_neighbor
 
     def ce_gradient(self, x, y):
         x.required_grad_(True)
@@ -81,7 +81,7 @@ class ConvModel(nn.Module):
         gradient = torch.autograd.grad(outputs=ce_loss, inputs=x, grad_outputs=torch.ones_like(ce_loss), create_graph=True)[0]
         return gradient
 
-    def snnl_gradient(self, x, factors, w_label):
+    def snnl_gradient(self, x, w_label, factors):
         x.require_grad_(True)
         soft_nearest_neighbor = self.snnl_loss(x, factors, w_label)
         gradient = torch.autograd.grad(outputs=soft_nearest_neighbor, inputs=x, grad_outputs=torch.ones_like(soft_nearest_neighbor), create_graph=True)
@@ -91,5 +91,4 @@ class ConvModel(nn.Module):
         mistakes = torch.argmax(y, dim=1) != torch.argmax(self.forward(x), dim=1)
         error_rate = torch.mean(mistakes.float())
         return error_rate
-    
     
