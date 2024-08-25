@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-from EWE.utils.utils import snnl_single
+from utils.utils import snnl_single
 
 class ConvModel(nn.Module):
     def __init__(self, num_classes, batch_size, in_channels):
