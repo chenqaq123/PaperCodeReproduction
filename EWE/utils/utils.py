@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import random
-import torch.functional as F
+import torch.nn.functional as F
 
 def setup_seed(seed):
     random.seed(seed)

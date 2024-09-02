@@ -3,6 +3,8 @@ import os
 
 from utils.utils import setup_seed
 
+from utils.regression_trianer import RegTrainer
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=512,
@@ -15,7 +17,7 @@ def parse_args():
                         help='epochs for training without watermarking')
     parser.add_argument('--w_epochs', type=int, default=10, 
                         help='epochs for training with watermarking')
-    parser.add_argument('--dataset', type=str, default="cifar10", 
+    parser.add_argument('--dataset', type=str, default="mnist", 
                         help='mnist, fashion, speechcmd, cifar10, or cifar100')
     parser.add_argument('--model', type=str, default="2_conv", 
                         help='2_conv, lstm, or resnet')
@@ -60,4 +62,8 @@ if __name__ == "__main__":
     args = parse_args()
     setup_seed(args.seed)
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device.strip() 
+
+    trainer = RegTrainer(args)
+    trainer.setup()
+    trainer.train()
     

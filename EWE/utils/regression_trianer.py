@@ -8,10 +8,10 @@ import os
 import pickle
 import numpy as np  
 import scipy.io as sio
+from tqdm import tqdm
 
 from models.conv import ConvModel
 from utils.trainer import Trainer
-from utils.utils import snnl
 
 class RegTrainer(Trainer):
     def setup(self):
@@ -41,7 +41,7 @@ class RegTrainer(Trainer):
         self.dataset = args.dataset
         self.model_type = args.model
         self.maxiter = args.maxiter
-        self.distrib = args.distrib
+        self.distribution = args.distrib
         self.layers = args.layers
         self.metric = args.metric
         self.shuffle = args.shuffle
@@ -93,8 +93,8 @@ class RegTrainer(Trainer):
                 mnist = pickle.load(f)
             self.x_train, self.y_train, self.x_test, self.y_test = mnist["training_images"], mnist["training_labels"], \
                                             mnist["test_images"], mnist["test_labels"]
-            self.x_train = np.reshape(self.x_train / 255, [-1, 28, 28, 1])
-            x_test = np.reshape(x_test / 255, [-1, 28, 28, 1])
+            self.x_train = np.reshape(self.x_train / 255, [-1, 1, 28, 28])
+            self.x_test = np.reshape(self.x_test / 255, [-1, 1, 28, 28])
         else:
             raise NotImplementedError('Dataset is not implemented.')
         
@@ -108,8 +108,8 @@ class RegTrainer(Trainer):
         return super().setup()
     
     def train(self):
-        height = self.x_train[0].shape[0]
-        width = self.x_train[0].shape[1]
+        height = self.x_train[0].shape[1]
+        width = self.x_train[0].shape[2]
 
         half_batch_size = int(self.batch_size / 2)
         target_data = self.x_train[self.y_train == self.target]
@@ -130,7 +130,7 @@ class RegTrainer(Trainer):
                 x_w, y_w = w_data["training_images"], w_data["training_labels"]
             else:
                 raise NotImplementedError()
-            x_w = np.reshape(x_w / 255, [-1, height, width, self.channels])
+            x_w = np.reshape(x_w / 255, [-1, self.channels, height, width])
             watermark_source_data = x_w[y_w == self.source]
         else:
             raise NotImplementedError("Distribution could only be either \'in\' or \'out\'.")
@@ -148,9 +148,12 @@ class RegTrainer(Trainer):
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=self.shuffle)
 
         optimizer = optim.Adam(self.ewe_model.parameters(), lr=self.lr, betas=(0.9, 0.99), eps=1e-5)
-        for _ in range(self.epochs):
+        for epoch in range(self.epochs):
             self.ewe_model.train()
-            for _, (x, y) in enumerate(train_loader):
+            for _, (x, y) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{self.epochs}", ncols=100)):
+                # x: [512, 1, 28, 28]
+                if len(x) != self.batch_size:
+                    continue    
                 snnl_loss = self.ewe_model.snnl_loss(x, y, np.zeros([self.batch_size]), self.factors, self.temperatures)
                 optimizer.zero_grad()
                 snnl_loss.backward()
@@ -162,8 +165,11 @@ class RegTrainer(Trainer):
         else:
             w_pos = [-1, -1]
 
-        # SNNL过程
+
         w_num_batch = target_data.shape[0] // self.batch_size * 2
+        self.test(self.ewe_model, w_num_batch, trigger)
+
+        # SNNL过程
         step_list = np.zeros([w_num_batch])
         for batch in range(w_num_batch):
             current_trigger = trigger[batch * half_batch_size: (batch + 1) * half_batch_size]
@@ -174,11 +180,14 @@ class RegTrainer(Trainer):
                     current_trigger = np.clip(current_trigger - self.w_lr * np.sign(grad[:half_batch_size]), 0, 1)
                 
                 batch_data = np.concatenate([current_trigger, target_data[batch * half_batch_size: (batch + 1) * half_batch_size]], 0)
-                grad = self.ewe_model.snnl_gradient(batch_data, self.factors, w_label)[0]
+                batch_data = torch.tensor(batch_data, dtype=torch.float32)
+                grad = self.ewe_model.snnl_gradient(batch_data, w_label, self.factors)[0]
+                grad = grad.detach().numpy()
                 current_trigger = np.clip(current_trigger + self.w_lr * np.sign(grad[:half_batch_size]), 0, 1)
 
             for _ in range(5):
-                grad = self.ce_gradient(self.ewe_model, np.concatenate([current_trigger, current_trigger], 0), self.target)[0]
+                grad = self.ewe_model.ce_gradient(np.concatenate([current_trigger, current_trigger], 0), self.target)[0]
+                grad = grad.detach().numpy()
                 current_trigger = np.clip(current_trigger - self.w_lr * np.sign(grad[:half_batch_size]), 0, 1)
             trigger[batch * half_batch_size: (batch + 1) * half_batch_size] = current_trigger
         
@@ -186,14 +195,16 @@ class RegTrainer(Trainer):
         trigger_label[:, self.target] = 1
         num_batch = self.x_train.shape[0] // self.batch_size
         index = np.arange(self.y_train.shape[0])
-        for _ in range(round(self.w_epochs * num_batch / w_num_batch)):
+        x_train = self.x_train
+        y_train = self.y_train
+        for epoch in range(round(self.w_epochs * num_batch / w_num_batch)):
             if self.shuffle:
                 np.random.shuffle(index)
                 x_train = x_train[index]
                 y_train = y_train[index]
             j = 0
             normal = 0
-            for batch in range(w_num_batch):
+            for batch in tqdm(range(w_num_batch), desc=f"Processing Batches {epoch}/{round(self.w_epochs * num_batch / w_num_batch)}", ncols=100):
                 if self.ratio >= 1:
                     for i in range(int(self.ratio)):
                         if j >= num_batch:
@@ -216,11 +227,19 @@ class RegTrainer(Trainer):
                     normal += 1
 
                 batch_data = np.concatenate([trigger[batch * half_batch_size: (batch + 1) * half_batch_size], target_data[batch * half_batch_size: (batch + 1) * half_batch_size]], 0) 
-                self.temperatures.required_grad_(True)
-                snnl_loss = self.ewe_model.snnl_loss(batch_data, trigger_label, w_label, self.factors, self.temperatures)
-                grad = torch.autograd.grad(outputs=snnl_loss, inputs=self.temperatures, grad_outputs=torch.ones_like(snnl_loss), create_graph=True)
-                self.temperatures -= self.t_lr * grad[0]
+                
+                temperatures = torch.tensor(self.temperatures, dtype=torch.float32)
+                temperatures.requires_grad_(True)
+                trigger_label = np.full(len(batch_data), self.target, dtype=np.int32)
+                snnl_loss = self.ewe_model.snnl_loss(batch_data, trigger_label, w_label, self.factors, temperatures)
+                grad = torch.autograd.grad(outputs=snnl_loss, inputs=temperatures, grad_outputs=torch.ones_like(snnl_loss), create_graph=True)
+                temperatures = temperatures - self.t_lr * grad[0]
+                self.temperatures -= temperatures.detach().numpy()
+            
+            self.test(self.ewe_model, w_num_batch, trigger)
 
+    def test(self, model, w_num_batch, trigger):
+        half_batch_size = self.batch_size // 2
         victim_error_list = []
         num_test = self.x_test.shape[0] // self.batch_size
         for batch in range(num_test):
@@ -238,7 +257,7 @@ class RegTrainer(Trainer):
 
 
     def validate_watermark(self, model, trigger_set, label):
-        labels = torch.zeros([self.batch_size, self.num_class], device=self.device)
+        labels = torch.zeros([self.batch_size, self.num_classes])
         # 设置目标标签
         labels[:, label] = 1
         
@@ -248,7 +267,8 @@ class RegTrainer(Trainer):
         else:
             trigger_data = trigger_set
         
-        trigger_data = torch.tensor(trigger_data, device=self.device).float()
+        # trigger_data = torch.tensor(trigger_data, device=self.device).float()
+        trigger_data = torch.tensor(trigger_data).float()
         model.eval()
         # 计算误差率（假设模型输出为 logits，使用交叉熵损失）
         with torch.no_grad():
